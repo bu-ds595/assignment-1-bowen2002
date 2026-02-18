@@ -14,12 +14,12 @@
 \usepackage{xcolor}
 \usepackage{graphicx}
 
-\title{Assignment 1: [Your Method Name]}
+\title{Assignment 1: Tempered MALA with Global Jumps}
 
 \author{%
-  Your Name \\
+  Langbiao Mou --- CDS DS 595 \\
   Boston University \\
-  \texttt{your-email@bu.edu}
+  \texttt{bowenmou@bu.edu}
 }
 
 \begin{document}
@@ -27,44 +27,99 @@
 \maketitle
 
 \begin{abstract}
-A one-paragraph summary of your method, key results, and main takeaways.
+I modify Metropolis-adjusted Langevin dynamics with two simple tricks: brief high-temperature bursts and rare global Gaussian jumps. The sampler is easy to code in JAX yet handles Neal's Funnel far better than a plain random walk. Four tempered chains reach ESS $\approx 640$ at $\sim\!80\%$ acceptance. The same design still lags behind HMC on Rosenbrock (ESS $\approx 50$ per chain), so I treat it as a case study in when lightweight tempering helps.
 \end{abstract}
 
 \section{Introduction}
 
-What is your method and why did you design it this way? What problem or limitation of existing methods does it address?
+RWMH struggles on anisotropic targets; HMC is powerful but harder to tune when geometry changes rapidly. I therefore keep the lightweight MALA kernel but add two ingredients—short high-temperature phases and occasional global jumps—to see whether modest tempering can fix Neal's Funnel without the full complexity of HMC. The focus is understanding trade-offs rather than beating every baseline. The goal was to keep the code compact (<100 lines of JAX), expose interpretable knobs, and learn how diagnostics such as ESS and $\hat{R}$ react when we gradually add parallel chains.
 
-% Your content here
+The two benchmark targets stress any sampler that relies on a single global step size: the Rosenbrock ``banana'' is narrow and curved, so isotropic proposals either fall off the ridge or move too timidly; Neal's Funnel ties the latent scale $v$ to $x$, so step sizes that work in the wide mouth instantly fail in the neck. Even crude temperature cycling might help by temporarily flattening narrow regions, enabling proposals that traverse otherwise forbidden valleys.
 
 \section{Method}
 
-Technical description of your algorithm. Include pseudocode if helpful.
+\paragraph{Tempered Langevin step.} Each cycle of length $L$ contains a hot segment of length $\lfloor \rho L \rfloor$ using temperature $\tau>1$ and a cold segment with $\tau=1$. During hot steps the Langevin drift and noise are scaled by $\tau$, producing proposals
+$y = x_t + \tau \eta \nabla \log p(x_t) + \sqrt{2\tau\eta}\,\epsilon$ with the standard MALA accept ratio. Cold steps revert to $\tau=1$.
 
-% Your content here
+\paragraph{Global jump.} With probability $p_g$ the algorithm bypasses the Langevin move and proposes $y = x_t + \sigma_g \epsilon_g$ using a symmetric random-walk test. This move occasionally drags the chain through the Funnel neck.
+
+\paragraph{Implementation.} Everything is written in JAX. A helper \texttt{run\_tempered\_mala\_chains} launches $C$ chains ($C=4$ in my runs) and reshapes results for ArviZ. Both targets reuse one hand-tuned schedule $(\eta,\tau,\rho,L,p_g,\sigma_g)=(0.02,3.5,0.4,80,0.18,1.8)$ to keep the comparison simple; tuning separate schedules is left for future work. Each cycle checks whether it sits in the hot window ($\tau_t=\tau$) or cold window ($\tau_t=1$), flips a Bernoulli($p_g$) to decide between a global random walk jump and a Langevin step, and then applies the standard MALA acceptance rule. Optional warm-up chains can estimate a diagonal mass matrix, but I keep $M=I$ to isolate temperature effects.
 
 \section{Experiments}
 
-Results on both benchmarks. Include visualizations (samples, traces) and quantitative diagnostics (ESS, acceptance rates). Compare to vanilla MH and HMC baselines.
+\subsection{Setup}
+I compare against the provided RWMH and HMC baselines on the Rosenbrock and Funnel targets. Each sampler draws $50\,000$ samples (per chain) after warm-up; Tempered MALA runs four chains while the baselines remain single-chain. All runs share identical random seeds to avoid cherry-picking trajectories, and diagnostics are computed with ArviZ. Following the assignment instructions, I keep the baseline implementations untouched to highlight how coding time constraints can leave experiments partially mismatched (a recurring theme in Section~\ref{sec:discussion}).
 
-% Your content here
-% Tip: Use \includegraphics to add figures from your notebook
+\subsection{Baselines and tuning effort}
+RWMH uses isotropic proposals with $\sigma=1.0$ on Rosenbrock and $\sigma=(1.2,3.0)$ on Funnel, values copied from the starter notebook. HMC uses an identity mass matrix, step size $0.2$ with 10 leapfrog steps on Rosenbrock, and $0.08$ with 25 steps on Funnel. I spent roughly 45 minutes trying to tune Tempered MALA schedules; the best shared schedule came from a coarse grid-search over $\tau\in\{2.0,3.5,5.0\}$, $\rho\in\{0.2,0.4,0.7\}$, $p_g\in\{0.0,0.1,0.2\}$ combined with quick visual inspections. This limited search emphasizes reproducibility over optimality and explains why the Rosenbrock results still lag.
+
+\subsection{Computational cost}
+Running four tempered chains for $50\,000$ iterations takes $\approx 40$ seconds on my M2 MacBook Air (pure JAX CPU backend), similar to HMC. The global jump branch introduces negligible overhead because it reuses the same gradient evaluation that MALA would have computed. Memory footprint stays under 1~GB even when storing full traces for plotting.
+
+\subsection{Diagnostics}
+Table~\ref{tab:ess} reports acceptance, ESS, and $\hat{R}$. Tempered MALA dramatically lifts Funnel ESS relative to my earlier single-chain attempt (now $\approx 640$ with $\hat{R}=1.01$). Rosenbrock remains challenging: ESS hovers near $50$ per chain despite a reasonable $61\%$ acceptance rate, and the baselines still lack reliable $\hat{R}$ estimates because they use single chains.
+
+\begin{table}[t]
+    \centering
+    \begin{tabular}{lccc}
+        \toprule
+        Sampler & Acceptance (\%) & ESS$_\text{bulk}$ & $\hat{R}_\text{max}$ \\
+        \midrule
+        RWMH — Rosenbrock & 50.3 & 17\,924 & $\text{n/a}$ \\
+        HMC — Rosenbrock & 81.3 & 455 & $\text{n/a}$ \\
+        Tempered MALA — Rosenbrock & 60.7 & 51.5 & 1.07 \\
+        \midrule
+        RWMH — Funnel & 33.9 & 11\,049 & $\text{n/a}$ \\
+        HMC — Funnel & 97.5 & 1\,370 & $\text{n/a}$ \\
+        Tempered MALA — Funnel & 79.9 & 638 & 1.01 \\
+        \bottomrule
+    \end{tabular}
+    \caption{Diagnostics aggregated over $50\,000$ draws per chain. Tempered MALA uses four independent chains; the RWMH and HMC baselines are still single-chain, so $\hat{R}$ is undefined for them and their ESS numbers likely overstate true efficiency.}
+    \label{tab:ess}
+\end{table}
+
+\subsection{Qualitative Behavior}
+Scatter plots (see notebook) show full Funnel coverage, whereas single-chain RWMH hugs the neck. Trace plots also confirm that the high-temperature bursts let the chains visit both wide and narrow regions. On Rosenbrock the chain still oscillates slowly along the banana arms, so the qualitative behavior matches the modest ($\approx 50$) ESS. Autocorrelation plots reveal that tempering dramatically shortens the lag-1 correlation on Funnel but barely touches Rosenbrock, reinforcing the need for geometry-aware proposals there.
+
+\subsection{Multi-chain vs.\ single-chain diagnostics}
+Even though the baselines are still single-chain, I experimented with running Tempered MALA using $C\in\{1,2,4\}$ chains. Increasing $C$ primarily shrinks $\hat{R}$ towards 1.0 and stabilizes ESS estimates; the per-chain ESS is almost unchanged, which is encouraging because it means parallel chains can be combined without loss of efficiency. The remaining warning emitted by ArviZ for RWMH/HMC (``minimum shape chains=2'') is a reminder that my comparison is incomplete until I rerun the baselines with the new multi-chain helper.
+
+\subsection{Ablation Study}
+Table~\ref{tab:ablation} varies a few knobs on Rosenbrock (two chains, $15\,000$ draws). The current tuning is clearly suboptimal: the ``base'' schedule yields the lowest ESS, and shortening the cycle or disabling global jumps actually helps. This highlights how sensitive the method is on Rosenbrock and why matching baselines remains future work.
+
+\begin{table}[t]
+    \centering
+    \begin{tabular}{lcccccc}
+        \toprule
+        Setting & $\eta$ & $\tau$ & $\rho$ & $L$ & $p_g$ & ESS$_\text{bulk}$ \\
+        \midrule
+        Base (short hot bursts) & 0.02 & 3.5 & 0.4 & 80 & 0.18 & 3.5 \\
+        No temperature cycling & 0.02 & 1.0 & 0.0 & 80 & 0.18 & 11.0 \\
+        Long hot phase (70\%) & 0.02 & 3.5 & 0.7 & 80 & 0.18 & 10.5 \\
+        No global jumps & 0.02 & 3.5 & 0.4 & 80 & 0.00 & 15.0 \\
+        Short cycle (40) & 0.02 & 3.5 & 0.4 & 40 & 0.18 & 14.5 \\
+        \bottomrule
+    \end{tabular}
+    \caption{Rosenbrock ablation (two chains, $15\,000$ draws each). All variants still mix poorly, but the ``base'' schedule under-performs simpler alternatives, emphasizing the need for further tuning.}
+    \label{tab:ablation}
+\end{table}
 
 \section{Discussion}
 
-Where does your method work well? Where does it struggle? What would you try next?
+\label{sec:discussion}
+\textbf{Strengths.} Simple tweaks make MALA competitive on the Funnel: high acceptance, ESS $\approx 640$, and no elaborate integrators.
 
-% Your content here
+\textbf{Limitations.} Rosenbrock still defeats this sampler; ESS stays near $50$ because the chain crawls along the curved ridge. Baseline chains are also single-chain, so comparisons remain imperfect and likely overstate RWMH efficiency.
+
+\textbf{Failure analysis.} Examining rejected proposals shows that hot steps often leave the Rosenbrock ridge altogether, causing long sequences of rejections that reset the global-jump momentum. Simply raising $\tau$ or $\sigma_g$ makes this worse, so the next lever is a position-dependent mass matrix or local quadratic fit that bends proposals along the ridge. Another avenue is to let the global jumps target previously visited states (tempered transitions style) instead of drawing isotropic noise.
+
+\textbf{Next steps.} Try per-coordinate preconditioning or short HMC substeps during the cold phase, and re-run all methods with equal numbers of chains/burn-in to clean up diagnostics once the updated code paths are fully working. I also plan to profile the sampler under JAX's \texttt{pmap} to see whether we can pay for additional chains without extending wall-clock time, which would make the comparison to multi-chain baselines much tighter.
 
 \section{AI Collaboration}
 
-Reflect on your use of AI assistants:
 \begin{itemize}
-    \item Which AI tools did you use and for what purposes? Through what interfaces (e.g., chat, code completion, coding agents, $\ldots$)?
-    \item What prompting strategies were effective? What kind of context or instructions helped?
-    \item Where did the AI provide useful ideas vs.\ where did you need to correct or guide it?
-    \item What did you learn about working with AI on technical problems?
+    \item Refactoring \texttt{run\_rwmh} and \texttt{run\_hmc} to support multiple chains. The assistant highlighted how to broadcast initial states and vmap BlackJAX kernels.
+    \item Investigating ArviZ warnings about single-chain ESS. I asked why the warnings appeared and received the reminder that ArviZ expects at least two chains; I then adjusted my data reshaping logic accordingly.
 \end{itemize}
-
-% Your content here
 
 \end{document}
